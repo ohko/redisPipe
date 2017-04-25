@@ -2,7 +2,6 @@ package redisPipe
 
 import (
 	"log"
-	"runtime"
 	"time"
 
 	"github.com/garyburd/redigo/redis"
@@ -10,34 +9,26 @@ import (
 
 // RedisPipe Redis批量指令
 type RedisPipe struct {
-	pool    *redis.Pool     // redis 连接池
-	send    chan *sendQueue // 发送channel
-	bufSize int             // 发送channel缓冲大小
+	pool      *redis.Pool   // redis 连接池
+	queue     chan *command // 发送队列
+	queueSize int           // 发送队列缓冲大小
+	runCount  int64         // 执行次数
 }
 
 // 指令结构
-type sendQueue struct {
-	ch   chan []*RecvData
-	cmds []*SendCmd
-}
-
-// SendCmd ...
-type SendCmd struct {
-	cmd  string
-	args redis.Args
-}
-
-// RecvData ...
-type RecvData struct {
-	reply interface{}
-	err   *error
+type command struct {
+	ch    chan bool    // Wait，等待返回
+	reply *interface{} // 返回值
+	err   *error       // 返回错误
+	cmd   string       // 指令
+	args  redis.Args   // 值
 }
 
 // NewRedisPipe ...
 func NewRedisPipe(rawurl string, bufSize int) *RedisPipe {
-	o := &RedisPipe{}
-	o.bufSize = bufSize
-	o.send = make(chan *sendQueue, bufSize)
+	o := new(RedisPipe)
+	o.queueSize = bufSize
+	o.queue = make(chan *command, bufSize)
 	o.pool = &redis.Pool{
 		Wait:      true, // 连接池满了，等待其它使用者归还
 		MaxIdle:   50,   // 最大空闲连接
@@ -45,7 +36,7 @@ func NewRedisPipe(rawurl string, bufSize int) *RedisPipe {
 		// IdleTimeout: 3 * time.Second,
 		// 连接方法
 		Dial: func() (redis.Conn, error) {
-			c, err := redis.DialURL("redis://x:" + rawurl)
+			c, err := redis.DialURL("redis://:" + rawurl)
 			if err != nil {
 				log.Println("redis链接错误:", err)
 				c.Close()
@@ -69,161 +60,79 @@ func NewRedisPipe(rawurl string, bufSize int) *RedisPipe {
 	return o
 }
 
-// GetPool 获取pool
-func (o *RedisPipe) GetPool() *redis.Pool {
-	return o.pool
+// Send 提交执行指令，无返回信息
+func (o *RedisPipe) Send(cmd string, args ...interface{}) {
+	o.queue <- &command{cmd: cmd, args: args}
 }
 
-// Send 发送指令
-func (o *RedisPipe) Send(ch chan []*RecvData, cmds []*SendCmd) {
-	db := o.pool.Get()
-	defer db.Close()
+// Do 执行指令，同步返回
+func (o *RedisPipe) Do(cmd string, args ...interface{}) (reply interface{}, err error) {
+	ch := make(chan bool)
+	o.queue <- &command{reply: &reply, err: &err, cmd: cmd, args: args, ch: ch}
+	<-ch
+	return
+}
 
-	o.send <- &sendQueue{ch: ch, cmds: cmds}
+// Do2 执行指令，一批指令后需要调用Wait等待返回
+func (o *RedisPipe) Do2(reply *interface{}, err *error, cmd string, args ...interface{}) {
+	o.queue <- &command{reply: reply, err: err, cmd: cmd, args: args}
+}
+
+// Wait 配合Do2使用
+func (o *RedisPipe) Wait() {
+	ch := make(chan bool)
+	o.queue <- &command{ch: ch}
+	<-ch
 }
 
 func (o *RedisPipe) do() {
-	var lastDoTime time.Time                  // 最后检查时间
-	var sendPackCount, cmdCount int           // 发送指令数量
-	recvCache := make([]*RecvData, o.bufSize) // 接受指令缓冲
-	var chIndex int                           // 返回chan的数量
-	chMap := make([]struct {                  // 存储返回chan与数量的关系
-		ch    chan []*RecvData
-		count int
-	}, o.bufSize)
+	var cmdCount int   // 指令发送数量
+	var chLen int      // 等待的指令数量
+	var rtn []*command // 接受返回数据
+	var c *command
 
-	db := o.pool.Get()
-	defer db.Close()
 	for {
-		runtime.Gosched()
-		now := time.Now()
-		// 间隔时间
-		_sub := now.Sub(lastDoTime)
-		if _sub < 2000000 {
-			time.Sleep(2000000 - _sub)
-			continue
-		}
-		lastDoTime = now
+		func() {
 
-		// 没指令
-		sendPackCount = len(o.send)
-		if sendPackCount == 0 {
-			continue
-		}
-
-		// 重制计数
-		chIndex = 0
-		cmdCount = 0
-
-		// 压入指令
-		// log.Println("压入指令")
-		for i := 0; i < sendPackCount; i++ {
-			s := <-o.send
-			if chMap[chIndex].ch == nil {
-				chMap[chIndex].ch = s.ch
-			} else if chMap[chIndex].ch != s.ch {
-				chIndex++
-				chMap[chIndex].ch = s.ch
+			// 等待执行，避免死循环造成CPU100%
+			chLen = len(o.queue)
+			if chLen == 0 { // 没有指令，休息一下
+				time.Sleep(time.Millisecond)
+				return
 			}
-			for _, v := range s.cmds {
-				db.Send(v.cmd, v.args...)
-				chMap[chIndex].count++
+
+			db := o.pool.Get()
+			defer db.Close()
+			cmdCount = 0
+
+			// 把缓冲拿空
+			rtn = make([]*command, chLen) // 生成指定大小的返回数据结构
+			for i := 0; i < chLen; i++ {
+				c = <-o.queue
+				rtn[i] = c
 				cmdCount++
-			}
-		}
-
-		// 执行指令
-		// log.Println("执行指令")
-		db.Flush()
-
-		// 接受数据
-		// log.Println("接受数据")
-		for i := 0; i < cmdCount; i++ {
-			r, e := db.Receive()
-			recvCache[i] = &RecvData{r, &e}
-		}
-
-		// 返回数据
-		// log.Println("返回数据")
-		index := 0
-		for i := 0; i <= chIndex; i++ {
-			v := &chMap[i]
-			d := make([]*RecvData, v.count)
-			for i := 0; i < v.count; i++ {
-				d[i] = recvCache[index]
-				index++
-				if i == v.count-1 {
-					v.ch <- d
-					break
+				if c.cmd != "" {
+					db.Send(c.cmd, c.args...)
 				}
 			}
-			v.ch = nil
-			v.count = 0
-		}
-		// log.Println("Next")
-	}
-}
+			// o.runCount++
+			db.Flush()
 
-// NewRedisPipeHelper ...
-func NewRedisPipeHelper() *RedisPipeHelper {
-	oo := new(RedisPipeHelper)
-	oo.cmds = make([]*SendCmd, 0)
-	oo.rtnsv = make(map[string]*RecvData, 0)
-	return oo
-}
-
-// RtnStruct 结果结构
-type RtnStruct struct {
-	Type      string // string/int/bool
-	String    string
-	Int       int
-	Bool      bool
-	Interface interface{}
-	Err       error
-}
-
-// RedisPipeHelper ...
-type RedisPipeHelper struct {
-	chRecv chan []*RecvData
-	cmds   []*SendCmd
-	rtns   []*RtnStruct
-	rtnsv  map[string]*RecvData
-}
-
-// Add 添加指令
-func (o *RedisPipeHelper) Add(addr *RtnStruct, cmd string, args ...interface{}) *RedisPipeHelper {
-	var as redis.Args
-	for _, v := range args {
-		as = as.Add(v)
-	}
-	o.rtns = append(o.rtns, addr)
-	o.cmds = append(o.cmds, &SendCmd{cmd: cmd, args: as})
-	return o
-}
-
-// Make 生产指令集
-func (o *RedisPipeHelper) Make() (chan []*RecvData, []*SendCmd) {
-	if o.chRecv == nil {
-		o.chRecv = make(chan []*RecvData, len(o.cmds))
-	}
-	return o.chRecv, o.cmds
-}
-
-// Wait 等待完成，并会写数据
-func (o *RedisPipeHelper) Wait() {
-	for k, vv := range <-o.chRecv {
-		if o.rtns[k] == nil {
-			continue
-		}
-		switch o.rtns[k].Type {
-		case "string":
-			o.rtns[k].String, o.rtns[k].Err = redis.String(vv.reply, *vv.err)
-		case "int":
-			o.rtns[k].Int, o.rtns[k].Err = redis.Int(vv.reply, *vv.err)
-		case "bool":
-			o.rtns[k].Bool, o.rtns[k].Err = redis.Bool(vv.reply, *vv.err)
-		default:
-			o.rtns[k].Interface, o.rtns[k].Err = vv.reply, *vv.err
-		}
+			for i := 0; i < cmdCount; i++ {
+				c = rtn[i]
+				if c.reply != nil && c.err != nil { // Do 需要先返回值，再通知
+					*(c.reply), *(c.err) = db.Receive()
+					if c.ch != nil {
+						c.ch <- true
+					}
+				} else {
+					if c.ch != nil { // Do2 通知Wait
+						c.ch <- true
+					} else {
+						db.Receive() // 读取不需要返回的数据
+					}
+				}
+			}
+		}()
 	}
 }
