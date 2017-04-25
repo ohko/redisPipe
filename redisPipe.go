@@ -69,6 +69,11 @@ func NewRedisPipe(rawurl string, bufSize int) *RedisPipe {
 	return o
 }
 
+// GetPool 获取pool
+func (o *RedisPipe) GetPool() *redis.Pool {
+	return o.pool
+}
+
 // Send 发送指令
 func (o *RedisPipe) Send(ch chan []*RecvData, cmds []*SendCmd) {
 	db := o.pool.Get()
