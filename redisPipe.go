@@ -39,7 +39,6 @@ func NewRedisPipe(rawurl string, bufSize int) *RedisPipe {
 			c, err := redis.DialURL("redis://:" + rawurl)
 			if err != nil {
 				log.Println("redis链接错误:", err)
-				c.Close()
 				return nil, err
 			}
 			return c, err
