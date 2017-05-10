@@ -84,6 +84,11 @@ func (o *RedisPipe) Wait() {
 	<-ch
 }
 
+// CacheRemaining 返回发送队列大小
+func (o *RedisPipe) CacheRemaining() int {
+	return len(o.queue)
+}
+
 func (o *RedisPipe) do() {
 	var cmdCount int   // 指令发送数量
 	var chLen int      // 等待的指令数量
