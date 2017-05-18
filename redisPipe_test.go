@@ -160,3 +160,13 @@ func send2(pipe *RedisPipe, j, size int, t *testing.T) {
 	// fmt.Println("send over.")
 	wg.Done()
 }
+
+func TestReply(t *testing.T) {
+	p := NewRedisPipe("abcd@10.5.193.90:6379", 1000000)
+	r := p.Send2("GET", "bidRequestCount/2017/05/08")
+	time.Sleep(time.Second)
+	_, ok, err := r.GetResult()
+	if nil != err || !ok {
+		t.Fatal(ok, err, r)
+	}
+}
