@@ -5,7 +5,10 @@ import (
 	"time"
 
 	"github.com/garyburd/redigo/redis"
+	"sync/atomic"
 )
+
+const DoOver int32 = 1
 
 // RedisPipe Redis批量指令
 type RedisPipe struct {
@@ -18,10 +21,36 @@ type RedisPipe struct {
 // 指令结构
 type command struct {
 	ch    chan bool    // Wait，等待返回
+	over  *int32       //如果有返回了，更新其值
 	reply *interface{} // 返回值
 	err   *error       // 返回错误
 	cmd   string       // 指令
 	args  redis.Args   // 值
+}
+
+// Reply Send2函数的返回结果
+type Reply struct {
+	reply interface{}
+	over  int32
+	err   error
+}
+
+// GetResult 获取返回结果
+// 如果已经有结果了，为实际结果和错位值；
+// 否则返回 nil,false,nil
+func (r *Reply) GetResult() (interface{}, bool, error) {
+	if atomic.LoadInt32(&r.over) != DoOver {
+		return nil, false, nil
+	}
+	return r.reply, true, r.err
+}
+
+// Send2 提交执行指令，返回 Reply
+func (o *RedisPipe) Send2(cmd string, args ...interface{}) *Reply {
+	r := &Reply{}
+	o.queue <- &command{reply: &r.reply, over: &r.over, err: &r.err,
+		cmd: cmd, args: args}
+	return r
 }
 
 // NewRedisPipe ...
@@ -69,6 +98,7 @@ func (o *RedisPipe) Do(cmd string, args ...interface{}) (reply interface{}, err 
 	ch := make(chan bool)
 	o.queue <- &command{reply: &reply, err: &err, cmd: cmd, args: args, ch: ch}
 	<-ch
+	close(ch)
 	return
 }
 
@@ -82,6 +112,7 @@ func (o *RedisPipe) Wait() {
 	ch := make(chan bool)
 	o.queue <- &command{ch: ch}
 	<-ch
+	close(ch)
 }
 
 // CacheRemaining 返回发送队列大小
@@ -128,6 +159,9 @@ func (o *RedisPipe) do() {
 					*(c.reply), *(c.err) = db.Receive()
 					if c.ch != nil {
 						c.ch <- true
+					}
+					if c.over != nil {
+						atomic.StoreInt32(c.over, DoOver)
 					}
 				} else {
 					if c.ch != nil { // Do2 通知Wait
