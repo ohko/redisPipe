@@ -17,8 +17,7 @@ var wg sync.WaitGroup
 // go test -run TestNewRedisPipe
 func Test1(t *testing.T) {
 	runtime.GOMAXPROCS(runtime.NumCPU())
-	// pipe := NewRedisPipe("hk@127.0.0.1:6379", 10000000)
-	pipe := NewRedisPipe("121a16741f331ca0e928e2b491281f2f@10.5.193.103:8888", 10000000)
+	pipe := NewRedisPipe("hk@127.0.0.1:6379", 10000000)
 
 	{ // INFO
 		t1 := time.Now()

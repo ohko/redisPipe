@@ -95,23 +95,27 @@ func (o *RedisPipe) do() {
 	var rtn []*command // 接受返回数据
 	var c *command
 
+	// 避免重复申请内存
+	rtn = make([]*command, o.queueSize)
+
 	for {
 		func() {
 
-			// 等待执行，避免死循环造成CPU100%
-			chLen = len(o.queue)
-			if chLen == 0 { // 没有指令，休息一下
-				time.Sleep(time.Millisecond)
-				return
-			}
+			// 试拿第一个，避免死循环造成CPU100%
+			c = <-o.queue
+			chLen = len(o.queue) + 1
 
 			db := o.pool.Get()
 			defer db.Close()
-			cmdCount = 0
 
 			// 把缓冲拿空
-			rtn = make([]*command, chLen) // 生成指定大小的返回数据结构
-			for i := 0; i < chLen; i++ {
+			// rtn = make([]*command, chLen) // 生成指定大小的返回数据结构
+			rtn[0] = c
+			cmdCount = 1
+			if c.cmd != "" {
+				db.Send(c.cmd, c.args...)
+			}
+			for i := 1; i < chLen; i++ {
 				c = <-o.queue
 				rtn[i] = c
 				cmdCount++
@@ -119,7 +123,6 @@ func (o *RedisPipe) do() {
 					db.Send(c.cmd, c.args...)
 				}
 			}
-			// o.runCount++
 			db.Flush()
 
 			for i := 0; i < cmdCount; i++ {
