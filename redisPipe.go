@@ -115,7 +115,7 @@ func (o *RedisPipe) do() {
 			if c.cmd != "" {
 				db.Send(c.cmd, c.args...)
 			}
-			for i := 1; i < chLen; i++ {
+			for i := 1; i < chLen && i < o.queueSize; i++ {
 				c = <-o.queue
 				rtn[i] = c
 				cmdCount++
