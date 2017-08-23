@@ -104,6 +104,9 @@ func (o *RedisPipe) do() {
 			// 试拿第一个，避免死循环造成CPU100%
 			c = <-o.queue
 			chLen = len(o.queue) + 1
+			if chLen > o.queueSize { // 防止chLen超过bufsize
+				chLen = o.queueSize
+			}
 
 			db := o.pool.Get()
 			defer db.Close()
